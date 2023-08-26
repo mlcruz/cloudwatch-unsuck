@@ -51,45 +51,50 @@ impl Sync {
                 let log_group_name = log_group.log_group_name().map(|s| s.to_string());
                 let mut log_stream_paginator = client
                     .describe_log_streams()
+                    .descending(true)
                     .set_log_group_name(log_group_name.clone())
                     .into_paginator()
+                    .items()
                     .send();
 
                 let start_time = Utc::now() - chrono::Duration::days(1);
-                while let Some(stream_description) =
-                    log_stream_paginator.next().await.transpose()?
-                {
-                    for stream in stream_description.log_streams().unwrap_or_default() {
-                        let mut logs_paginator = client
-                            .get_log_events()
-                            .set_start_time(start_time.timestamp_millis().into())
-                            .set_log_group_identifier(log_group_name.clone())
-                            .set_log_stream_name(Some(stream.log_stream_name.clone().unwrap()))
-                            .into_paginator()
-                            .send();
+                while let Some(stream) = log_stream_paginator.next().await.transpose()? {
+                    let mut logs_paginator = client
+                        .get_log_events()
+                        .set_start_time(start_time.timestamp_millis().into())
+                        .set_log_group_name(log_group_name.clone())
+                        .set_log_stream_name(Some(stream.log_stream_name.clone().unwrap()))
+                        .into_paginator()
+                        .send();
 
-                        while let Some(description) = logs_paginator.next().await.transpose()? {
-                            let log_events = description.events().unwrap_or_default();
-                            let tx = sqlite_conn.transaction().unwrap();
-                            let mut stmt = tx
+                    if let Some(last_event) = stream.last_event_timestamp() {
+                        if last_event < start_time.timestamp_millis() {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                    while let Some(description) = logs_paginator.next().await.transpose()? {
+                        let log_events = description.events().unwrap_or_default();
+                        let tx = sqlite_conn.transaction().unwrap();
+                        let mut stmt = tx
                         .prepare_cached(
                             "INSERT INTO log_events (timestamp, message, ingestion_time, log_group_name)
                     VALUES (?, ?, ?, ?)",
                         )
                         .unwrap();
 
-                            for event in log_events {
-                                stmt.execute(params![
-                                    event.timestamp,
-                                    event.message,
-                                    event.ingestion_time,
-                                    log_group.log_group_name().unwrap()
-                                ])
-                                .unwrap();
-                            }
-                            std::mem::drop(stmt);
-                            tx.commit().unwrap();
+                        for event in log_events {
+                            stmt.execute(params![
+                                event.timestamp,
+                                event.message,
+                                event.ingestion_time,
+                                log_group.log_group_name().unwrap()
+                            ])
+                            .unwrap();
                         }
+                        std::mem::drop(stmt);
+                        tx.commit().unwrap();
                     }
                 }
             }
