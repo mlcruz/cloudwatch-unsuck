@@ -11,7 +11,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    Sync {},
+    Sync {
+        #[arg(short, long)]
+        pattern: String,
+    },
 }
 
 pub fn open_sqlite() -> rusqlite::Connection {
@@ -25,7 +28,8 @@ pub fn open_sqlite() -> rusqlite::Connection {
 }
 
 pub fn create_tables(conn: &mut rusqlite::Connection) {
-    let query = "
+    conn.execute(
+        "
     CREATE TABLE IF NOT EXISTS log_groups (
         log_group_name TEXT,
         creation_time INTEGER,
@@ -34,7 +38,26 @@ pub fn create_tables(conn: &mut rusqlite::Connection) {
         arn TEXT,
         stored_bytes INTEGER,
         kms_key_id TEXT
-    );
-    ";
-    conn.execute(query, []).unwrap();
+    );",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS log_events (
+            timestamp INTEGER,
+            message TEXT,
+            ingestion_time INTEGER,
+            log_group_name TEXT
+        );
+    ",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS log_group_name_idx ON log_events (log_group_name);",
+        [],
+    )
+    .unwrap();
 }
