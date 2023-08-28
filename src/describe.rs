@@ -1,8 +1,8 @@
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 use futures::stream::StreamExt;
 use rusqlite::params;
 
-use crate::open_sqlite;
+use crate::{json_format, open_sqlite};
 pub struct Sync {
     pub pattern: String,
 }
@@ -25,6 +25,7 @@ impl Sync {
 
         while let Some(description) = group_paginator.next().await.transpose()? {
             for log_group in description.log_groups().unwrap_or_default() {
+                println!("syncing log group: {}", log_group.log_group_name().unwrap());
                 let query = "INSERT INTO log_groups (
                     log_group_name, 
                     creation_time, 
@@ -67,35 +68,51 @@ impl Sync {
                         .into_paginator()
                         .send();
 
-                    if let Some(last_event) = stream.last_event_timestamp() {
+                    if let Some(last_event) = stream.last_ingestion_time() {
                         if last_event < start_time.timestamp_millis() {
                             break;
                         }
                     } else {
+                        println!("breaking {}", stream.log_stream_name().unwrap());
                         break;
                     }
+
+                    let tx = sqlite_conn.transaction().unwrap();
+                    let mut stmt = tx
+                    .prepare_cached(
+                        "INSERT INTO log_events (timestamp, message, ingestion_time, log_group_name)
+                VALUES (?, ?, ?, ?)",
+                    )
+                    .unwrap();
+
+                    let mut count = 0;
+
                     while let Some(description) = logs_paginator.next().await.transpose()? {
                         let log_events = description.events().unwrap_or_default();
-                        let tx = sqlite_conn.transaction().unwrap();
-                        let mut stmt = tx
-                        .prepare_cached(
-                            "INSERT INTO log_events (timestamp, message, ingestion_time, log_group_name)
-                    VALUES (?, ?, ?, ?)",
-                        )
-                        .unwrap();
 
                         for event in log_events {
+                            count += 1;
                             stmt.execute(params![
                                 event.timestamp,
-                                event.message,
+                                json_format(event.message.clone().unwrap_or_default()),
                                 event.ingestion_time,
                                 log_group.log_group_name().unwrap()
                             ])
                             .unwrap();
                         }
-                        std::mem::drop(stmt);
-                        tx.commit().unwrap();
                     }
+                    println!(
+                        "{} {} {}",
+                        NaiveDateTime::from_timestamp_millis(stream.creation_time().unwrap())
+                            .unwrap(),
+                        NaiveDateTime::from_timestamp_millis(
+                            stream.last_ingestion_time().unwrap_or_default()
+                        )
+                        .unwrap(),
+                        { count }
+                    );
+                    std::mem::drop(stmt);
+                    tx.commit().unwrap();
                 }
             }
         }
